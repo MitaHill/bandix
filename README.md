@@ -372,7 +372,45 @@ Get connection statistics for all devices.
 
 **Device (d):** `mac`, `ip4`, `host`, `tcp`, `udp`, `tcp_est`, `tcp_tw`, `tcp_cw`, `total`, `last` (ms).
 
-**Note:** Device statistics only count outgoing connections. Only devices in the ARP table within the interface subnet are included. All timestamps in milliseconds.
+**Note:** Device statistics only count outgoing connections; IPv4 and IPv6 are merged per MAC into one device. IPv4 sources must be
+in the ARP table and within the interface subnet; IPv6 sources must be in the neighbor table and within one of the interface's
+GUA/ULA prefixes (link-local prefixes are shared by every interface and cannot distinguish LAN from WAN, so they are not used).
+A device seen only over IPv6 and absent from the ARP table reports `ip4` as `0.0.0.0`. All timestamps in milliseconds.
+
+#### GET /api/connection/flows
+Get individual connection flows, covering both IPv4 and IPv6.
+
+**Query Parameters:**
+- `ip` (optional): Filter by source address. Passing a device's IPv4 address expands the filter to every address of the same MAC,
+  so the device's IPv6 flows are returned as well
+- `protocol` (optional): `tcp` or `udp`
+- `state` (optional): TCP state, e.g. `ESTABLISHED`
+- `page` / `page_size` (optional): Passing either returns a paginated object, otherwise a plain array. `page_size` defaults to
+  `200`, max `1000`
+
+**Response:**
+```json
+{
+  "status": "success",
+  "data": [
+    {
+      "protocol": "udp",
+      "state": null,
+      "orig": { "src": "2408:8239:5602:83aa::1", "dst": "2600:1900:4001:4b5:8000::", "sport": 60545, "dport": 80 },
+      "repl": { "src": "2600:1900:4001:4b5:8000::", "dst": "2408:8239:5602:83aa::1", "sport": 80, "dport": 60545 },
+      "orig_packets": 6,
+      "orig_bytes": 849,
+      "repl_packets": 6,
+      "repl_bytes": 494,
+      "flags": ["[ASSURED]"]
+    }
+  ]
+}
+```
+
+**Note:** `conntrack -L` defaults to AF_INET when `-f` is omitted and only dumps IPv4, so bandix runs both
+`conntrack -L -f ipv4` and `conntrack -L -f ipv6` and merges the output; if the kernel has no IPv6 conntrack, only IPv4 flows are
+returned. Results are sorted by source address, IPv4 before IPv6. IPv6 has no NAT, so `repl` is always the mirror of `orig`.
 
 ### DNS Monitoring API
 

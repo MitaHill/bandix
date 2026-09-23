@@ -475,7 +475,42 @@ sudo ./bandix --iface br-lan --tc-priority 10 --enable-traffic
 
 **顶层：** `cnt`=设备数；`last`=全局最后更新时间（毫秒）。
 
-**注意：** 设备统计只计算出站连接。只包含在 ARP 表中且与指定网络接口在同一子网内的设备。所有时间戳均为毫秒。
+**注意：** 设备统计只计算出站连接，IPv4 与 IPv6 按 MAC 合并到同一台设备。IPv4 需在 ARP 表中且与指定网络接口在同一子网内；
+IPv6 需在邻居表中且地址落在该接口的 GUA/ULA 前缀内（link-local 前缀所有接口共用，无法区分 LAN/WAN，不参与判定）。
+只有 IPv6 而不在 ARP 表中的设备，`ip4` 字段为 `0.0.0.0`。所有时间戳均为毫秒。
+
+#### GET /api/connection/flows
+获取单条连接明细，同时包含 IPv4 和 IPv6。
+
+**查询参数：**
+- `ip`（可选）：按源地址过滤。传入设备的 IPv4 地址时会自动展开为同一 MAC 的全部地址，因此该设备的 IPv6 连接也会一并返回
+- `protocol`（可选）：`tcp` 或 `udp`
+- `state`（可选）：TCP 状态，如 `ESTABLISHED`
+- `page` / `page_size`（可选）：传入任一参数则返回分页对象，否则直接返回数组。`page_size` 默认 `200`，最大 `1000`
+
+**响应：**
+```json
+{
+  "status": "success",
+  "data": [
+    {
+      "protocol": "udp",
+      "state": null,
+      "orig": { "src": "2408:8239:5602:83aa::1", "dst": "2600:1900:4001:4b5:8000::", "sport": 60545, "dport": 80 },
+      "repl": { "src": "2600:1900:4001:4b5:8000::", "dst": "2408:8239:5602:83aa::1", "sport": 80, "dport": 60545 },
+      "orig_packets": 6,
+      "orig_bytes": 849,
+      "repl_packets": 6,
+      "repl_bytes": 494,
+      "flags": ["[ASSURED]"]
+    }
+  ]
+}
+```
+
+**注意：** `conntrack -L` 不带 `-f` 时 family 缺省为 AF_INET，只会 dump IPv4，所以 bandix 会分别执行
+`conntrack -L -f ipv4` 与 `conntrack -L -f ipv6` 再合并；内核未启用 IPv6 conntrack 时只返回 IPv4 结果。
+结果按源地址排序，IPv4 在前、IPv6 在后。IPv6 没有 NAT，`repl` 恒为 `orig` 的镜像。
 
 ### DNS 监控 API
 
