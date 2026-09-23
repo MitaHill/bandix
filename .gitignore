@@ -54,3 +54,5 @@ release_readme.md
 upload_release.sh
 
 bandix.db
+# 本地交付产物（不入库）
+dist/
