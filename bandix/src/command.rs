@@ -550,6 +550,37 @@ impl SubnetInfo {
     }
 }
 
+// 把接口当前的 IPv6 地址写入 IPV6_SUBNET_INFO 映射
+// 先写新条目再清掉多余槽位，避免刷新期间出现所有网段都未配置的空窗
+fn write_ipv6_subnets(
+    ipv6_subnet_info: &mut Array<aya::maps::MapData, [u8; 32]>,
+    ipv6_addresses: &[([u8; 16], u8)],
+) -> Result<(), anyhow::Error> {
+    for (idx, (ipv6_addr, prefix_len)) in ipv6_addresses.iter().enumerate().take(16) {
+        let mut subnet_data = [0u8; 32];
+        subnet_data[0..16].copy_from_slice(ipv6_addr);
+        subnet_data[16] = *prefix_len;
+        subnet_data[17] = 1;
+        ipv6_subnet_info.set(idx as u32, &subnet_data, 0)?;
+
+        let addr_type = crate::utils::network_utils::classify_ipv6_address(ipv6_addr);
+        log::info!(
+            "Configured IPv6 subnet {}: {}/{} [Type: {}, Network: {}]",
+            idx,
+            crate::utils::network_utils::format_ipv6_with_privacy(ipv6_addr),
+            prefix_len,
+            addr_type.type_name(),
+            addr_type.network_scope()
+        );
+    }
+
+    for idx in ipv6_addresses.len().min(16)..16 {
+        ipv6_subnet_info.set(idx as u32, &[0u8; 32], 0)?;
+    }
+
+    Ok(())
+}
+
 // 创建模块上下文：加载 eBPF 程序，配置内核映射，并创建上下文对象
 async fn create_module_contexts(
     options: &Options,
@@ -640,28 +671,31 @@ async fn create_module_contexts(
 
             // 配置 IPv6 子网信息映射
             let mut ipv6_subnet_info: Array<_, [u8; 32]> = Array::try_from(ebpf.take_map("IPV6_SUBNET_INFO").unwrap())?;
+            write_ipv6_subnets(&mut ipv6_subnet_info, &subnet_info.ipv6_addresses)?;
 
-            for i in 0..16 {
-                ipv6_subnet_info.set(i, &[0u8; 32], 0)?;
-            }
+            // WAN 掉线重拨后 ISP 下发的 PD 前缀可能变化，接口的 IPv6 地址随之更新。
+            // 映射只在启动时写一次的话，内核里留的是旧前缀，新前缀的包会被判为非本地而漏统计
+            // （IPv4 的 LAN 网段不随 WAN 变化，所以只有 IPv6 受影响）。这里定期比对并重写。
+            let refresh_iface = options.iface().to_string();
+            let mut known_ipv6_addresses = subnet_info.ipv6_addresses.clone();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(30));
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    interval.tick().await;
 
-            for (idx, (ipv6_addr, prefix_len)) in subnet_info.ipv6_addresses.iter().enumerate().take(16) {
-                let mut subnet_data = [0u8; 32];
-                subnet_data[0..16].copy_from_slice(ipv6_addr);
-                subnet_data[16] = *prefix_len;
-                subnet_data[17] = 1;
-                ipv6_subnet_info.set(idx as u32, &subnet_data, 0)?;
+                    let current = crate::utils::network_utils::get_interface_ipv6_info(&refresh_iface);
+                    if current == known_ipv6_addresses {
+                        continue;
+                    }
 
-                let addr_type = crate::utils::network_utils::classify_ipv6_address(ipv6_addr);
-                log::info!(
-                    "Configured IPv6 subnet {}: {}/{} [Type: {}, Network: {}]",
-                    idx,
-                    crate::utils::network_utils::format_ipv6_with_privacy(ipv6_addr),
-                    prefix_len,
-                    addr_type.type_name(),
-                    addr_type.network_scope()
-                );
-            }
+                    log::info!("IPv6 addresses of {} changed, reconfiguring subnet info maps...", refresh_iface);
+                    match write_ipv6_subnets(&mut ipv6_subnet_info, &current) {
+                        Ok(()) => known_ipv6_addresses = current,
+                        Err(e) => log::warn!("Failed to reconfigure IPv6 subnet info: {}", e),
+                    }
+                }
+            });
         }
 
         Some(ebpf)
